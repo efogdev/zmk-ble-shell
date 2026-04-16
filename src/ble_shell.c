@@ -24,7 +24,7 @@
 #include <zephyr/logging/log_backend.h>
 #include <zephyr/logging/log_output.h>
 #include <zephyr/logging/log_ctrl.h>
-#include <zephyr/sys/ring_buf.h>
+#include <zephyr/sys/ring_buffer.h>
 #include <string.h>
 
 #include <zmk/ble.h>
@@ -62,12 +62,10 @@ static void zbs_tx_enqueue(const uint8_t *data, size_t len)
         return;
     }
     k_spinlock_key_t key = k_spin_lock(&zbs_tx_lock);
-    uint32_t space = ring_buf_space_get(&zbs_tx_rb);
-    if (space < (uint32_t)len) {
-        /* Drop oldest to make room. */
-        uint8_t discard[len - space];
-        ring_buf_get(&zbs_tx_rb, discard, (uint32_t)(len - space));
-    }
+    /*
+     * ring_buf_put() writes as many bytes as fit and silently drops the
+     * rest — no need for a discard loop or VLA here.
+     */
     ring_buf_put(&zbs_tx_rb, data, (uint32_t)len);
     k_spin_unlock(&zbs_tx_lock, key);
 }
