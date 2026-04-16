@@ -16,10 +16,9 @@ if ZMK_BLE_SHELL
 config ZMK_BLE_SHELL_TX_BUF_SIZE
     int "TX ring-buffer size (bytes)"
     default 2048
-    help
-      Bytes reserved for outgoing data (shell command output + log lines)
-      before they are sent over BLE.  Oldest data is dropped when the
-      buffer is full.
+
+config SHELL_BACKEND_DUMMY_BUF_SIZE
+    default 2048 if ZMK_BLE_SHELL
 
 config ZMK_BLE_SHELL_CMD_BUF_SIZE
     int "Maximum shell command length (bytes, including NUL)"
@@ -27,9 +26,15 @@ config ZMK_BLE_SHELL_CMD_BUF_SIZE
 
 config ZMK_BLE_SHELL_LOG_BUF_SIZE
     int "Log-formatting scratch buffer size (bytes)"
-    default 160
-    help
-      Intermediate buffer used when formatting a single log message
-      before it is placed in the TX ring buffer.
+    default 256
+
+config ZMK_BLE_SHELL_PROMPT_EN
+    bool "Send prompt after connect and each command"
+    default y
+
+config ZMK_BLE_SHELL_PROMPT
+    string "BLE shell prompt string"
+    depends on ZMK_BLE_SHELL_PROMPT_EN
+    default SHELL_PROMPT_UART
 
 endif # ZMK_BLE_SHELL
