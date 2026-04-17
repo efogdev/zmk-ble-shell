@@ -1,0 +1,16 @@
+description: |
+  BLE shell advertise behavior.
+
+  When triggered from a keymap binding this behavior starts an extended
+  advertising set that broadcasts the zmk-ble-shell GATT service UUID,
+  allowing a management UI (MUI) client to discover and connect to the
+  device even while a HID profile is already bonded and connected.
+
+  Advertising stops automatically after CONFIG_ZMK_BLE_SHELL_ADV_TIMEOUT
+  seconds if no client subscribes to the shell characteristic.
+
+compatible: "zmk,behavior-ble-shell-adv"
+
+include: zero_param.yaml
+
+properties: {}

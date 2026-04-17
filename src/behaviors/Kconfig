@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+
+config ZMK_BLE_SHELL_ADV_BEHAVIOR
+    bool "BLE shell advertise behavior"
+    depends on ZMK_BLE_SHELL
+    help
+      Adds the zmk,behavior-ble-shell-adv ZMK behavior.  When triggered
+      from a keymap binding it starts a connectable legacy advertising
+      session that broadcasts the shell GATT service UUID.  This allows a
+      management UI client to discover and connect to the device.
+      Advertising stops automatically after ZMK_BLE_SHELL_ADV_TIMEOUT
+      seconds if no client subscribes to the shell characteristic.
+      Requires BT_MAX_CONN > 1 to accept the second connection.
+
+config ZMK_BLE_SHELL_ADV_TIMEOUT
+    int "MUI advertisement timeout (seconds)"
+    depends on ZMK_BLE_SHELL_ADV_BEHAVIOR
+    default 30
+    help
+      How many seconds to advertise the shell service before giving up
+      when no management UI client subscribes.

@@ -1,0 +1,8 @@
+/ {
+	behaviors {
+		zbs_adv: zbs_adv {
+			compatible = "zmk,behavior-ble-shell-adv";
+			#binding-cells = <0>;
+		};
+	};
+};

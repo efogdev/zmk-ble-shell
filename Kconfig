@@ -1,1 +1,2 @@
-rsource "src/Kconfig"
+rsource "src/ble_shell/Kconfig"
+rsource "src/behaviors/Kconfig"

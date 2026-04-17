@@ -34,16 +34,17 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/ble_active_profile_changed.h>
 
+#include "ble_shell_private.h"
+
 #if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
 #include <zmk_adaptive_feedback/adaptive_feedback.h>
 
-ZAF_CUSTOM_EVENT_DEFINE(zbs_mui_conn_evt,   "mui-conn");
-ZAF_CUSTOM_EVENT_DEFINE(zbs_mui_disconn_evt, "mui-disconn");
+ZAF_CUSTOM_EVENT_DEFINE(zbs_conn_evt,    "mui-conn");
+ZAF_CUSTOM_EVENT_DEFINE(zbs_disconn_evt, "mui-disconn");
 #endif /* CONFIG_ZMK_ADAPTIVE_FEEDBACK */
 
 LOG_MODULE_REGISTER(zmk_ble_shell, CONFIG_ZMK_LOG_LEVEL);
 
-#define SVC_UUID_DATA BT_UUID_128_ENCODE(0xc901c4e9, 0x5770, 0x4bf1, 0x96b2, 0x2dd287813e6e)
 #define ZBS_SVC_UUID BT_UUID_DECLARE_128(SVC_UUID_DATA)
 
 #define ZBS_CHAR_UUID \
@@ -52,6 +53,11 @@ LOG_MODULE_REGISTER(zmk_ble_shell, CONFIG_ZMK_LOG_LEVEL);
 
 static volatile bool zbs_notif_enabled;
 static bool          zbs_log_first_enable;
+
+bool zmk_ble_shell_connected(void)
+{
+    return zbs_notif_enabled;
+}
 
 RING_BUF_DECLARE(zbs_tx_rb, CONFIG_ZMK_BLE_SHELL_TX_BUF_SIZE);
 static struct k_spinlock zbs_tx_lock;
@@ -122,17 +128,6 @@ static void zbs_log_init(const struct log_backend *const backend)
     log_backend_deactivate(backend);
 }
 
-static int zbs_log_is_ready(const struct log_backend *const backend)
-{
-    ARG_UNUSED(backend);
-    return -EACCES;
-}
-
-static void zbs_log_panic(const struct log_backend *const backend)
-{
-    ARG_UNUSED(backend);
-}
-
 static int zbs_log_format_set(const struct log_backend *const backend,
                                const uint32_t log_type)
 {
@@ -144,9 +139,9 @@ static int zbs_log_format_set(const struct log_backend *const backend,
 static const struct log_backend_api zbs_log_backend_api = {
     .process    = zbs_log_process,
     .dropped    = NULL,
-    .panic      = zbs_log_panic,
+    .panic      = NULL,
     .init       = zbs_log_init,
-    .is_ready   = zbs_log_is_ready,
+    .is_ready   = NULL,
     .format_set = zbs_log_format_set,
 };
 
@@ -182,7 +177,10 @@ static void zbs_ccc_changed(const struct bt_gatt_attr *attr, const uint16_t valu
         zbs_send_prompt();
 #endif
 #if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
-        zaf_custom_event_trigger(&zbs_mui_conn_evt);
+        zaf_custom_event_trigger(&zbs_conn_evt);
+#endif
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_ADV_BEHAVIOR)
+        zmk_ble_shell_adv_on_connected();
 #endif
     } else {
         log_backend_deactivate(&log_backend_zbs);
@@ -191,7 +189,7 @@ static void zbs_ccc_changed(const struct bt_gatt_attr *attr, const uint16_t valu
         ring_buf_reset(&zbs_tx_rb);
         k_spin_unlock(&zbs_tx_lock, key);
 #if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
-        zaf_custom_event_trigger(&zbs_mui_disconn_evt);
+        zaf_custom_event_trigger(&zbs_disconn_evt);
 #endif
     }
 }
@@ -247,7 +245,7 @@ static void zbs_cmd_exec_work_handler(struct k_work *work)
     const char *out = shell_backend_dummy_get_output(sh, &out_len);
 
     if (ret == -ENOEXEC) {
-        char msg[CONFIG_ZMK_BLE_SHELL_CMD_BUF_SIZE + 24];
+        char msg[16 + sizeof(": command not found")];
         const int n = snprintk(msg, sizeof(msg),
                                "%s: command not found", cmd);
         if (n > 0) {
@@ -309,24 +307,25 @@ static K_WORK_DELAYABLE_DEFINE(zbs_inject_sd_work, zbs_inject_sd_work_handler);
 static void zbs_inject_sd_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-    LOG_WRN("Injecting BLE shell service to the advertising data…");
-    const int err = bt_le_adv_update_data(zbs_ad, ARRAY_SIZE(zbs_ad),
-                                          zbs_sd, ARRAY_SIZE(zbs_sd));
-    if (err && err != -EAGAIN) {
-        LOG_DBG("adv_update_data err %d", err);
+    const int err = bt_le_adv_update_data(zbs_ad, ARRAY_SIZE(zbs_ad), zbs_sd, ARRAY_SIZE(zbs_sd));
+    if (err) {
+        LOG_DBG("adv_update_data err %d, will retry", err);
+        k_work_reschedule(&zbs_inject_sd_work, K_MSEC(200));
+    } else {
+        LOG_DBG("BLE shell service injected into advertising data");
     }
 }
 
 static int zbs_ble_profile_listener(const zmk_event_t *eh)
 {
     ARG_UNUSED(eh);
-    k_work_reschedule(&zbs_inject_sd_work, K_NO_WAIT);
+    k_work_reschedule(&zbs_inject_sd_work, K_MSEC(100));
     return ZMK_EV_EVENT_BUBBLE;
 }
 
 static int zbs_init(void)
 {
-    k_work_schedule(&zbs_inject_sd_work, K_SECONDS(1));
+    k_work_schedule(&zbs_inject_sd_work, K_MSEC(200));
     return 0;
 }
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 config ZMK_BLE_SHELL
     bool "ZMK BLE Shell GATT service"
     depends on BT
