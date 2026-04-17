@@ -30,6 +30,13 @@
 
 #include <zmk/ble.h>
 
+#if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
+#include <zmk_adaptive_feedback/adaptive_feedback.h>
+
+ZAF_CUSTOM_EVENT_DEFINE(zbs_mui_conn_evt,   "mui-conn");
+ZAF_CUSTOM_EVENT_DEFINE(zbs_mui_disconn_evt, "mui-disconn");
+#endif /* CONFIG_ZMK_ADAPTIVE_FEEDBACK */
+
 LOG_MODULE_REGISTER(zmk_ble_shell, CONFIG_ZMK_LOG_LEVEL);
 
 #define ZBS_SVC_UUID \
@@ -145,7 +152,7 @@ BT_GATT_SERVICE_DEFINE(zbs_svc,
     BT_GATT_PRIMARY_SERVICE(ZBS_SVC_UUID),
     BT_GATT_CHARACTERISTIC(ZBS_CHAR_UUID,
                            BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
-                           BT_GATT_PERM_WRITE,
+                           BT_GATT_PERM_WRITE | BT_GATT_PERM_READ,
                            NULL, zbs_write_cmd, NULL),
     BT_GATT_CCC(zbs_ccc_changed,
                 BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
@@ -170,12 +177,18 @@ static void zbs_ccc_changed(const struct bt_gatt_attr *attr, const uint16_t valu
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_PROMPT_EN)
         zbs_send_prompt();
 #endif
+#if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
+        zaf_custom_event_trigger(&zbs_mui_conn_evt);
+#endif
     } else {
         log_backend_deactivate(&log_backend_zbs);
 
         const k_spinlock_key_t key = k_spin_lock(&zbs_tx_lock);
         ring_buf_reset(&zbs_tx_rb);
         k_spin_unlock(&zbs_tx_lock, key);
+#if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
+        zaf_custom_event_trigger(&zbs_mui_disconn_evt);
+#endif
     }
 }
 
@@ -207,7 +220,6 @@ static ssize_t zbs_write_cmd(struct bt_conn *conn,
     zbs_cmd_buf[end] = '\0';
 
     k_mutex_unlock(&zbs_cmd_mutex);
-
     k_work_submit(&zbs_cmd_exec_work);
     return (ssize_t)len;
 }
@@ -215,7 +227,6 @@ static ssize_t zbs_write_cmd(struct bt_conn *conn,
 static void zbs_cmd_exec_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-
     char cmd[CONFIG_ZMK_BLE_SHELL_CMD_BUF_SIZE];
 
     k_mutex_lock(&zbs_cmd_mutex, K_FOREVER);
@@ -271,7 +282,6 @@ static void zbs_tx_flush_work_handler(struct k_work *work)
         mtu = 23;
     }
     const uint16_t chunk_max = mtu - ZBS_ATT_OVERHEAD;
-
     uint8_t chunk[CONFIG_BT_L2CAP_TX_MTU];
     uint32_t got;
 
