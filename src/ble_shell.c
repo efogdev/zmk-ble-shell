@@ -16,6 +16,8 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/init.h>
+#include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/shell/shell.h>
@@ -29,6 +31,8 @@
 #include <errno.h>
 
 #include <zmk/ble.h>
+#include <zmk/event_manager.h>
+#include <zmk/events/ble_active_profile_changed.h>
 
 #if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
 #include <zmk_adaptive_feedback/adaptive_feedback.h>
@@ -39,9 +43,9 @@ ZAF_CUSTOM_EVENT_DEFINE(zbs_mui_disconn_evt, "mui-disconn");
 
 LOG_MODULE_REGISTER(zmk_ble_shell, CONFIG_ZMK_LOG_LEVEL);
 
-#define ZBS_SVC_UUID \
-    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xc901c4e9, 0x5770, 0x4bf1, \
-                                           0x96b2, 0x2dd287813e6e))
+#define SVC_UUID_DATA BT_UUID_128_ENCODE(0xc901c4e9, 0x5770, 0x4bf1, 0x96b2, 0x2dd287813e6e)
+#define ZBS_SVC_UUID BT_UUID_DECLARE_128(SVC_UUID_DATA)
+
 #define ZBS_CHAR_UUID \
     BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xc901c4ea, 0x5770, 0x4bf1, \
                                            0x96b2, 0x2dd287813e6e))
@@ -262,6 +266,74 @@ static void zbs_cmd_exec_work_handler(struct k_work *work)
     zbs_send_prompt();
 #endif
 }
+
+#define DEVICE_APPEARANCE                                                                          \
+    (uint8_t) CONFIG_BT_DEVICE_APPEARANCE, (uint8_t)(CONFIG_BT_DEVICE_APPEARANCE >> 8)
+
+/*
+ * Inject the shell service UUID into the BLE scan response so that
+ * Web Bluetooth on Windows (WinRT) and Android can discover the device.
+ *
+ * Linux/BlueZ is lenient and discovers GATT services post-connection even
+ * without the UUID in the advertisement.  Windows and Android strictly
+ * require the UUID to appear in the advertisement or scan response before
+ * requestDevice() will match the filter.
+ *
+ * ZMK's zmk_ble_ad[] is static and not exported, so we cannot append to it.
+ * Instead we subscribe to zmk_ble_active_profile_changed (fired whenever
+ * advertising starts or restarts) and call bt_le_adv_update_data() with:
+ *   - ad  : a local copy of ZMK's known compile-time-constant ad entries
+ *   - sd  : our 128-bit service UUID in the scan response
+ *
+ * Zephyr's le_adv_update() re-appends the device name automatically when
+ * BT_LE_ADV_OPT_FORCE_NAME_IN_AD is set, so the name is not lost.
+ */
+
+/* Mirror of ZMK's zmk_ble_ad[] — these are compile-time constants in ble.c */
+static const struct bt_data zbs_ad[] = {
+    BT_DATA_BYTES(BT_DATA_GAP_APPEARANCE, DEVICE_APPEARANCE),
+    BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+    BT_DATA_BYTES(BT_DATA_UUID16_SOME,
+      0x12, 0x18, /* HID Service    */
+      0x0f, 0x18  /* Battery Service */
+    ),
+};
+
+static const struct bt_data zbs_sd[] = {
+    BT_DATA_BYTES(BT_DATA_UUID128_ALL, SVC_UUID_DATA),
+};
+
+static void zbs_inject_sd_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(zbs_inject_sd_work, zbs_inject_sd_work_handler);
+
+static void zbs_inject_sd_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    LOG_WRN("Injecting BLE shell service to the advertising data…");
+    const int err = bt_le_adv_update_data(zbs_ad, ARRAY_SIZE(zbs_ad),
+                                          zbs_sd, ARRAY_SIZE(zbs_sd));
+    if (err && err != -EAGAIN) {
+        LOG_DBG("adv_update_data err %d", err);
+    }
+}
+
+static int zbs_ble_profile_listener(const zmk_event_t *eh)
+{
+    ARG_UNUSED(eh);
+    k_work_reschedule(&zbs_inject_sd_work, K_NO_WAIT);
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+static int zbs_init(void)
+{
+    k_work_schedule(&zbs_inject_sd_work, K_SECONDS(1));
+    return 0;
+}
+
+SYS_INIT(zbs_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+
+ZMK_LISTENER(zmk_ble_shell, zbs_ble_profile_listener);
+ZMK_SUBSCRIPTION(zmk_ble_shell, zmk_ble_active_profile_changed);
 
 #define ZBS_ATT_OVERHEAD 3
 
