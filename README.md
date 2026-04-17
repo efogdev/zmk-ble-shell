@@ -46,6 +46,37 @@ CONFIG_ZMK_BLE_SHELL=y
 | `ZMK_BLE_SHELL_PROMPT_EN` | y | Send prompt after connect and each command |
 | `ZMK_BLE_SHELL_PROMPT` | `SHELL_PROMPT_UART` | Prompt string (ANSI green) |
 
+## Behavior: `&zbs_adv`
+
+On Linux, the device is discoverable without any extra steps. On macOS, Windows and Android, Web Bluetooth API will only show the device if it is either paired-but-not-connected, or actively advertising the shell service UUID. This behavior handles the latter: press the bound key to start a short advertising burst so the client can discover the device.
+
+Enable in config:
+
+```kconfig
+CONFIG_ZMK_BLE_SHELL_ADV_BEHAVIOR=y
+CONFIG_BT_MAX_CONN=2  # required to accept the second connection
+```
+
+The behavior is defined automatically via `ble_shell_adv.dtsi`. Use it in your keymap:
+
+```dts
+/ {
+    keymap {
+        compatible = "zmk,keymap";
+        default_layer {
+            bindings = <&zbs_adv>;  // bind to any key
+        };
+    };
+};
+```
+
+Advertising stops after `CONFIG_ZMK_BLE_SHELL_ADV_TIMEOUT` seconds (default: 30) if no client subscribes, or immediately upon subscription.
+
+| Option | Default | Description |
+|---|---|---|
+| `ZMK_BLE_SHELL_ADV_BEHAVIOR` | n | Enable the behavior |
+| `ZMK_BLE_SHELL_ADV_TIMEOUT` | 30 | Seconds to advertise before giving up |
+
 ## Client
 
 Any BLE GATT client works. Enable notifications on the characteristic, then write commands as plain UTF-8 strings (newlines are stripped before execution).
