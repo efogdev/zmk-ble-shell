@@ -39,4 +39,13 @@ config ZMK_BLE_SHELL_PROMPT
     depends on ZMK_BLE_SHELL_PROMPT_EN
     default SHELL_PROMPT_UART
 
+config ZMK_BLE_SHELL_DATA_CHANNEL
+    bool "BLE data push channel (second NOTIFY characteristic)"
+    default y
+
+config ZMK_BLE_SHELL_DATA_TX_BUF_SIZE
+    int "Data channel TX ring-buffer size (bytes)"
+    depends on ZMK_BLE_SHELL_DATA_CHANNEL
+    default 128
+
 endif # ZMK_BLE_SHELL

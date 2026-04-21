@@ -2,8 +2,10 @@
  * zmk-ble-shell — BLE GATT shell service
  *
  * Service UUID    : c901c4e9-5770-4bf1-96b2-2dd287813e6e
- * Characteristic  : c901c4ea-5770-4bf1-96b2-2dd287813e6e
+ * Shell char      : c901c4ea-5770-4bf1-96b2-2dd287813e6e
  *   Properties    : NOTIFY | WRITE_WITHOUT_RESP
+ * Data char       : c901c4eb-5770-4bf1-96b2-2dd287813e6e  (if DATA_CHANNEL enabled)
+ *   Properties    : NOTIFY
  *
  * Written payload → executed as a Zephyr shell command; output is
  * relayed back via NOTIFY.  While the client has notifications enabled,
@@ -35,6 +37,7 @@
 #include <zmk/events/ble_active_profile_changed.h>
 
 #include "ble_shell_private.h"
+#include <zmk_ble_shell/data_channel.h>
 
 #if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
 #include <zmk_adaptive_feedback/adaptive_feedback.h>
@@ -51,16 +54,85 @@ LOG_MODULE_REGISTER(zmk_ble_shell, CONFIG_ZMK_LOG_LEVEL);
     BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xc901c4ea, 0x5770, 0x4bf1, \
                                            0x96b2, 0x2dd287813e6e))
 
+#define ZBS_DATA_CHAR_UUID \
+    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xc901c4eb, 0x5770, 0x4bf1, \
+                                           0x96b2, 0x2dd287813e6e))
+
+#define ZBS_ATT_OVERHEAD 3
+
 static volatile bool zbs_notif_enabled;
 static bool          zbs_log_first_enable;
 
-bool zmk_ble_shell_connected(void)
-{
-    return zbs_notif_enabled;
-}
-
 RING_BUF_DECLARE(zbs_tx_rb, CONFIG_ZMK_BLE_SHELL_TX_BUF_SIZE);
 static struct k_spinlock zbs_tx_lock;
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
+static volatile bool zbs_data_notif_enabled;
+RING_BUF_DECLARE(zbs_data_rb, CONFIG_ZMK_BLE_SHELL_DATA_TX_BUF_SIZE);
+static struct k_spinlock zbs_data_tx_lock;
+#endif
+
+struct zbs_channel {
+    struct ring_buf           *rb;
+    struct k_spinlock         *lock;
+    struct k_work             *flush_work;
+    const struct bt_gatt_attr *value_attr;
+    const char                *tag;
+};
+
+static void zbs_channel_flush(const struct zbs_channel *ch)
+{
+    struct bt_conn *conn = zmk_ble_active_profile_conn();
+    if (!conn) {
+        return;
+    }
+
+    uint16_t mtu = bt_gatt_get_mtu(conn);
+    if (mtu <= ZBS_ATT_OVERHEAD) {
+        mtu = 23;
+    }
+    const uint16_t chunk_max = mtu - ZBS_ATT_OVERHEAD;
+    uint8_t chunk[CONFIG_BT_L2CAP_TX_MTU];
+
+    while (true) {
+        const k_spinlock_key_t key = k_spin_lock(ch->lock);
+        const uint32_t got = ring_buf_get(ch->rb, chunk, chunk_max);
+        k_spin_unlock(ch->lock, key);
+
+        if (got == 0) {
+            break;
+        }
+
+        const int err = bt_gatt_notify(conn, ch->value_attr, chunk, (uint16_t)got);
+        if (err == -EAGAIN || err == -ENOMEM) {
+            const k_spinlock_key_t rkey = k_spin_lock(ch->lock);
+            ring_buf_put(ch->rb, chunk, got);
+            k_spin_unlock(ch->lock, rkey);
+            k_work_submit(ch->flush_work);
+            break;
+        } else if (err) {
+            LOG_WRN("%s notify err %d", ch->tag, err);
+            break;
+        }
+    }
+
+    bt_conn_unref(conn);
+}
+
+static void zbs_tx_flush_work_handler(struct k_work *work);
+static void zbs_cmd_exec_work_handler(struct k_work *work);
+static void zbs_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
+static ssize_t zbs_write_cmd(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                             const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
+
+static K_WORK_DEFINE(zbs_tx_flush_work, zbs_tx_flush_work_handler);
+static K_WORK_DEFINE(zbs_cmd_exec_work, zbs_cmd_exec_work_handler);
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
+static void zbs_data_tx_flush_work_handler(struct k_work *work);
+static void zbs_data_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
+static K_WORK_DEFINE(zbs_data_tx_flush_work, zbs_data_tx_flush_work_handler);
+#endif
 
 static void zbs_tx_enqueue(const uint8_t *data, const size_t len)
 {
@@ -72,16 +144,47 @@ static void zbs_tx_enqueue(const uint8_t *data, const size_t len)
     k_spin_unlock(&zbs_tx_lock, key);
 }
 
-static void zbs_tx_flush_work_handler(struct k_work *work);
-static void zbs_cmd_exec_work_handler(struct k_work *work);
-static void zbs_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
-static ssize_t zbs_write_cmd(struct bt_conn *conn,
-                             const struct bt_gatt_attr *attr,
-                             const void *buf, uint16_t len,
-                             uint16_t offset, uint8_t flags);
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
 
-static K_WORK_DEFINE(zbs_tx_flush_work, zbs_tx_flush_work_handler);
-static K_WORK_DEFINE(zbs_cmd_exec_work, zbs_cmd_exec_work_handler);
+bool zmk_ble_shell_data_connected(void)
+{
+    return zbs_data_notif_enabled;
+}
+
+void zmk_ble_shell_data_write(const uint8_t *data, const size_t len)
+{
+    if (len == 0 || !zbs_data_notif_enabled) {
+        return;
+    }
+    const k_spinlock_key_t key = k_spin_lock(&zbs_data_tx_lock);
+    ring_buf_put(&zbs_data_rb, data, (uint32_t)len);
+    k_spin_unlock(&zbs_data_tx_lock, key);
+    k_work_submit(&zbs_data_tx_flush_work);
+}
+
+static void zbs_data_ccc_changed(const struct bt_gatt_attr *attr, const uint16_t value)
+{
+    ARG_UNUSED(attr);
+    const bool enabled = (value == BT_GATT_CCC_NOTIFY);
+    zbs_data_notif_enabled = enabled;
+    LOG_DBG("BLE data channel notifications %s", enabled ? "enabled" : "disabled");
+    if (!enabled) {
+        const k_spinlock_key_t key = k_spin_lock(&zbs_data_tx_lock);
+        ring_buf_reset(&zbs_data_rb);
+        k_spin_unlock(&zbs_data_tx_lock, key);
+    }
+}
+
+#else /* !CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL */
+
+bool zmk_ble_shell_data_connected(void) { return false; }
+void zmk_ble_shell_data_write(const uint8_t *data, const size_t len)
+{
+    ARG_UNUSED(data);
+    ARG_UNUSED(len);
+}
+
+#endif /* CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL */
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_PROMPT_EN)
 static void zbs_send_prompt(void)
@@ -155,6 +258,14 @@ BT_GATT_SERVICE_DEFINE(zbs_svc,
                            NULL, zbs_write_cmd, NULL),
     BT_GATT_CCC(zbs_ccc_changed,
                 BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
+    BT_GATT_CHARACTERISTIC(ZBS_DATA_CHAR_UUID,
+                           BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_PERM_READ,
+                           NULL, NULL, NULL),
+    BT_GATT_CCC(zbs_data_ccc_changed,
+                BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+#endif
 );
 
 static void zbs_ccc_changed(const struct bt_gatt_attr *attr, const uint16_t value)
@@ -194,10 +305,8 @@ static void zbs_ccc_changed(const struct bt_gatt_attr *attr, const uint16_t valu
     }
 }
 
-static ssize_t zbs_write_cmd(struct bt_conn *conn,
-                             const struct bt_gatt_attr *attr,
-                             const void *buf, uint16_t len,
-                             const uint16_t offset, const uint8_t flags)
+static ssize_t zbs_write_cmd(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                             const void *buf, uint16_t len, const uint16_t offset, const uint8_t flags)
 {
     ARG_UNUSED(conn);
     ARG_UNUSED(attr);
@@ -264,6 +373,42 @@ static void zbs_cmd_exec_work_handler(struct k_work *work)
     zbs_send_prompt();
 #endif
 }
+
+static void zbs_tx_flush_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (!zbs_notif_enabled) {
+        return;
+    }
+    const struct zbs_channel ch = {
+        .rb         = &zbs_tx_rb,
+        .lock       = &zbs_tx_lock,
+        .flush_work = &zbs_tx_flush_work,
+        .value_attr = &zbs_svc.attrs[2],
+        .tag        = "shell",
+    };
+    zbs_channel_flush(&ch);
+}
+
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
+static void zbs_data_tx_flush_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (!zbs_data_notif_enabled) {
+        return;
+    }
+    const struct zbs_channel ch = {
+        .rb         = &zbs_data_rb,
+        .lock       = &zbs_data_tx_lock,
+        .flush_work = &zbs_data_tx_flush_work,
+        .value_attr = &zbs_svc.attrs[5],
+        .tag        = "data",
+    };
+    zbs_channel_flush(&ch);
+}
+#endif /* CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL */
+
+/* ── Advertising ─────────────────────────────────────────────────────────── */
 
 #define DEVICE_APPEARANCE                                                                          \
     (uint8_t) CONFIG_BT_DEVICE_APPEARANCE, (uint8_t)(CONFIG_BT_DEVICE_APPEARANCE >> 8)
@@ -333,51 +478,3 @@ SYS_INIT(zbs_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 ZMK_LISTENER(zmk_ble_shell, zbs_ble_profile_listener);
 ZMK_SUBSCRIPTION(zmk_ble_shell, zmk_ble_active_profile_changed);
-
-#define ZBS_ATT_OVERHEAD 3
-
-static void zbs_tx_flush_work_handler(struct k_work *work)
-{
-    ARG_UNUSED(work);
-    if (!zbs_notif_enabled) {
-        return;
-    }
-
-    struct bt_conn *conn = zmk_ble_active_profile_conn();
-    if (!conn) {
-        return;
-    }
-
-    uint16_t mtu = bt_gatt_get_mtu(conn);
-    if (mtu <= ZBS_ATT_OVERHEAD) {
-        mtu = 23;
-    }
-    const uint16_t chunk_max = mtu - ZBS_ATT_OVERHEAD;
-    uint8_t chunk[CONFIG_BT_L2CAP_TX_MTU];
-    uint32_t got;
-
-    const struct bt_gatt_attr *value_attr = &zbs_svc.attrs[2];
-    while (true) {
-        const k_spinlock_key_t key = k_spin_lock(&zbs_tx_lock);
-        got = ring_buf_get(&zbs_tx_rb, chunk, chunk_max);
-        k_spin_unlock(&zbs_tx_lock, key);
-
-        if (got == 0) {
-            break;
-        }
-
-        const int err = bt_gatt_notify(conn, value_attr, chunk, (uint16_t)got);
-        if (err == -EAGAIN || err == -ENOMEM) {
-            const k_spinlock_key_t rkey = k_spin_lock(&zbs_tx_lock);
-            ring_buf_put(&zbs_tx_rb, chunk, got);
-            k_spin_unlock(&zbs_tx_lock, rkey);
-            k_work_submit(&zbs_tx_flush_work);
-            break;
-        } else if (err) {
-            LOG_WRN("notify err %d", err);
-            break;
-        }
-    }
-
-    bt_conn_unref(conn);
-}
