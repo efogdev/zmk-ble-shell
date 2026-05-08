@@ -374,37 +374,39 @@ static void zbs_cmd_exec_work_handler(struct k_work *work)
 #endif
 }
 
+static const struct zbs_channel zbs_shell_ch = {
+    .rb         = &zbs_tx_rb,
+    .lock       = &zbs_tx_lock,
+    .flush_work = &zbs_tx_flush_work,
+    .value_attr = &zbs_svc.attrs[2],
+    .tag        = "shell",
+};
+
 static void zbs_tx_flush_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
     if (!zbs_notif_enabled) {
         return;
     }
-    const struct zbs_channel ch = {
-        .rb         = &zbs_tx_rb,
-        .lock       = &zbs_tx_lock,
-        .flush_work = &zbs_tx_flush_work,
-        .value_attr = &zbs_svc.attrs[2],
-        .tag        = "shell",
-    };
-    zbs_channel_flush(&ch);
+    zbs_channel_flush(&zbs_shell_ch);
 }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
+static const struct zbs_channel zbs_data_ch = {
+    .rb         = &zbs_data_rb,
+    .lock       = &zbs_data_tx_lock,
+    .flush_work = &zbs_data_tx_flush_work,
+    .value_attr = &zbs_svc.attrs[5],
+    .tag        = "data",
+};
+
 static void zbs_data_tx_flush_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
     if (!zbs_data_notif_enabled) {
         return;
     }
-    const struct zbs_channel ch = {
-        .rb         = &zbs_data_rb,
-        .lock       = &zbs_data_tx_lock,
-        .flush_work = &zbs_data_tx_flush_work,
-        .value_attr = &zbs_svc.attrs[5],
-        .tag        = "data",
-    };
-    zbs_channel_flush(&ch);
+    zbs_channel_flush(&zbs_data_ch);
 }
 #endif /* CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL */
 
