@@ -4,7 +4,7 @@ config ZMK_BLE_SHELL
     bool "ZMK BLE Shell GATT service"
     depends on BT
     depends on SHELL
-    select SHELL_BACKEND_DUMMY
+    select ZMK_SHELL_RELAY_CORE
     default y
     help
       Exposes a custom GATT service (UUID c901c4e9-...) with a single
@@ -14,13 +14,6 @@ config ZMK_BLE_SHELL
       ZMK log output is also forwarded through the same channel.
 
 if ZMK_BLE_SHELL
-
-config ZMK_BLE_SHELL_TX_BUF_SIZE
-    int "TX ring-buffer size (bytes)"
-    default 2048
-
-config SHELL_BACKEND_DUMMY_BUF_SIZE
-    default 2048 if ZMK_BLE_SHELL
 
 config ZMK_BLE_SHELL_CMD_BUF_SIZE
     int "Maximum shell command length (bytes, including NUL)"

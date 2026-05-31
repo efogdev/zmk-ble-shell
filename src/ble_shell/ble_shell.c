@@ -22,8 +22,6 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
-#include <zephyr/shell/shell.h>
-#include <zephyr/shell/shell_dummy.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_backend.h>
 #include <zephyr/logging/log_output.h>
@@ -38,6 +36,7 @@
 
 #include "ble_shell_private.h"
 #include <zmk_ble_shell/data_channel.h>
+#include <zmk_shell_relay/relay.h>
 
 #if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
 #include <zmk_adaptive_feedback/adaptive_feedback.h>
@@ -63,15 +62,13 @@ LOG_MODULE_REGISTER(zmk_ble_shell, CONFIG_ZMK_LOG_LEVEL);
 static volatile bool zbs_notif_enabled;
 static bool          zbs_log_first_enable;
 
-RING_BUF_DECLARE(zbs_tx_rb, CONFIG_ZMK_BLE_SHELL_TX_BUF_SIZE);
-static struct k_spinlock zbs_tx_lock;
-
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
 static volatile bool zbs_data_notif_enabled;
 RING_BUF_DECLARE(zbs_data_rb, CONFIG_ZMK_BLE_SHELL_DATA_TX_BUF_SIZE);
 static struct k_spinlock zbs_data_tx_lock;
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
 struct zbs_channel {
     struct ring_buf           *rb;
     struct k_spinlock         *lock;
@@ -118,6 +115,7 @@ static void zbs_channel_flush(const struct zbs_channel *ch)
 
     bt_conn_unref(conn);
 }
+#endif /* CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL */
 
 static void zbs_tx_flush_work_handler(struct k_work *work);
 static void zbs_cmd_exec_work_handler(struct k_work *work);
@@ -128,6 +126,17 @@ static ssize_t zbs_write_cmd(struct bt_conn *conn, const struct bt_gatt_attr *at
 static K_WORK_DEFINE(zbs_tx_flush_work, zbs_tx_flush_work_handler);
 static K_WORK_DEFINE(zbs_cmd_exec_work, zbs_cmd_exec_work_handler);
 
+static void zbs_shell_data_ready(void)
+{
+    if (zbs_notif_enabled) {
+        k_work_submit(&zbs_tx_flush_work);
+    }
+}
+
+static const struct zmk_shell_relay_sink zbs_shell_sink = {
+    .data_ready = zbs_shell_data_ready,
+};
+
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
 static void zbs_data_tx_flush_work_handler(struct k_work *work);
 static void zbs_data_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
@@ -136,12 +145,7 @@ static K_WORK_DEFINE(zbs_data_tx_flush_work, zbs_data_tx_flush_work_handler);
 
 static void zbs_tx_enqueue(const uint8_t *data, const size_t len)
 {
-    if (len == 0) {
-        return;
-    }
-    const k_spinlock_key_t key = k_spin_lock(&zbs_tx_lock);
-    ring_buf_put(&zbs_tx_rb, data, (uint32_t)len);
-    k_spin_unlock(&zbs_tx_lock, key);
+    zmk_shell_relay_enqueue(data, len);
 }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
@@ -278,6 +282,8 @@ static void zbs_ccc_changed(const struct bt_gatt_attr *attr, const uint16_t valu
     LOG_DBG("BLE shell notifications %s", enabled ? "enabled" : "disabled");
 
     if (enabled) {
+        zmk_shell_relay_reset();
+        zmk_shell_relay_attach(&zbs_shell_sink);
         if (!zbs_log_first_enable) {
             zbs_log_first_enable = true;
             log_backend_enable(&log_backend_zbs, NULL, CONFIG_LOG_MAX_LEVEL);
@@ -296,9 +302,8 @@ static void zbs_ccc_changed(const struct bt_gatt_attr *attr, const uint16_t valu
     } else {
         log_backend_deactivate(&log_backend_zbs);
 
-        const k_spinlock_key_t key = k_spin_lock(&zbs_tx_lock);
-        ring_buf_reset(&zbs_tx_rb);
-        k_spin_unlock(&zbs_tx_lock, key);
+        zmk_shell_relay_detach();
+        zmk_shell_relay_reset();
 #if IS_ENABLED(CONFIG_ZMK_ADAPTIVE_FEEDBACK)
         zaf_custom_event_trigger(&zbs_disconn_evt);
 #endif
@@ -331,7 +336,7 @@ static ssize_t zbs_write_cmd(struct bt_conn *conn, const struct bt_gatt_attr *at
     zbs_cmd_buf[end] = '\0';
 
     k_mutex_unlock(&zbs_cmd_mutex);
-    k_work_submit(&zbs_cmd_exec_work);
+    zmk_shell_relay_submit_exec(&zbs_cmd_exec_work);
     return (ssize_t)len;
 }
 
@@ -345,13 +350,7 @@ static void zbs_cmd_exec_work_handler(struct k_work *work)
     cmd[sizeof(cmd) - 1] = '\0';
     k_mutex_unlock(&zbs_cmd_mutex);
 
-    const struct shell *sh = shell_backend_dummy_get_ptr();
-
-    shell_backend_dummy_clear_output(sh);
-    const int ret = shell_execute_cmd(sh, cmd);
-
-    size_t out_len;
-    const char *out = shell_backend_dummy_get_output(sh, &out_len);
+    const int ret = zmk_shell_relay_execute(cmd);
 
     if (ret == -ENOEXEC) {
         char msg[16 + sizeof(": command not found")];
@@ -360,13 +359,8 @@ static void zbs_cmd_exec_work_handler(struct k_work *work)
         if (n > 0) {
             zbs_tx_enqueue((const uint8_t *)msg, (size_t)n);
         }
-    } else {
-        if (out_len > 0) {
-            zbs_tx_enqueue((const uint8_t *)out, out_len);
-        }
-        if (ret != 0) {
-            zbs_tx_enqueue((const uint8_t *)"\r\n", 2);
-        }
+    } else if (ret != 0) {
+        zbs_tx_enqueue((const uint8_t *)"\r\n", 2);
     }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_PROMPT_EN)
@@ -374,21 +368,45 @@ static void zbs_cmd_exec_work_handler(struct k_work *work)
 #endif
 }
 
-static const struct zbs_channel zbs_shell_ch = {
-    .rb         = &zbs_tx_rb,
-    .lock       = &zbs_tx_lock,
-    .flush_work = &zbs_tx_flush_work,
-    .value_attr = &zbs_svc.attrs[2],
-    .tag        = "shell",
-};
-
 static void zbs_tx_flush_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
     if (!zbs_notif_enabled) {
         return;
     }
-    zbs_channel_flush(&zbs_shell_ch);
+
+    struct bt_conn *conn = zmk_ble_active_profile_conn();
+    if (!conn) {
+        return;
+    }
+
+    uint16_t mtu = bt_gatt_get_mtu(conn);
+    if (mtu <= ZBS_ATT_OVERHEAD) {
+        mtu = 23;
+    }
+    const uint16_t chunk_max = mtu - ZBS_ATT_OVERHEAD;
+
+    while (true) {
+        uint8_t *chunk;
+        const uint32_t got = zmk_shell_relay_claim(&chunk, chunk_max);
+        if (got == 0) {
+            break;
+        }
+
+        const int err = bt_gatt_notify(conn, &zbs_svc.attrs[2], chunk, (uint16_t)got);
+        if (err == -EAGAIN || err == -ENOMEM) {
+            zmk_shell_relay_finish(0);
+            k_work_submit(&zbs_tx_flush_work);
+            break;
+        } else if (err) {
+            zmk_shell_relay_finish(0);
+            LOG_WRN("shell notify err %d", err);
+            break;
+        }
+        zmk_shell_relay_finish(got);
+    }
+
+    bt_conn_unref(conn);
 }
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)

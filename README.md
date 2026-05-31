@@ -28,7 +28,17 @@ manifest:
       remote: efogdev
       revision: main
       path: modules/zmk-ble-shell
+    - name: zmk-shell-relay-core
+      remote: efogdev
+      revision: main
+      path: modules/zmk-shell-relay-core
 ```
+
+> [!IMPORTANT]
+> The [`zmk-shell-relay-core`](https://github.com/efogdev/zmk-shell-relay-core)
+> module must be present for the shell relay to work. It owns the shared
+> internal shell instance and output buffer; without it this module will
+> not build.
 
 Enable in your shield/board config:
 
