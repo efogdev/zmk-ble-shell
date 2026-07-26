@@ -118,14 +118,12 @@ static void zbs_channel_flush(const struct zbs_channel *ch)
 #endif /* CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL */
 
 static void zbs_tx_flush_work_handler(struct k_work *work);
-static void zbs_cmd_exec_work_handler(struct k_work *work);
+static void zbs_cmd_done(const char *cmd, int ret);
 static void zbs_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static ssize_t zbs_write_cmd(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                              const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
 
 static K_WORK_DEFINE(zbs_tx_flush_work, zbs_tx_flush_work_handler);
-static K_WORK_DEFINE(zbs_cmd_exec_work, zbs_cmd_exec_work_handler);
-
 static void zbs_shell_data_ready(void)
 {
     if (zbs_notif_enabled) {
@@ -135,6 +133,7 @@ static void zbs_shell_data_ready(void)
 
 static const struct zmk_shell_relay_sink zbs_shell_sink = {
     .data_ready = zbs_shell_data_ready,
+    .cmd_done   = zbs_cmd_done,
 };
 
 #if IS_ENABLED(CONFIG_ZMK_BLE_SHELL_DATA_CHANNEL)
@@ -200,9 +199,6 @@ static void zbs_send_prompt(void)
     k_work_submit(&zbs_tx_flush_work);
 }
 #endif /* CONFIG_ZMK_BLE_SHELL_PROMPT_EN */
-
-static char        zbs_cmd_buf[CONFIG_ZMK_BLE_SHELL_CMD_BUF_SIZE];
-static K_MUTEX_DEFINE(zbs_cmd_mutex);
 
 static uint8_t   zbs_log_fmt_buf[CONFIG_ZMK_BLE_SHELL_LOG_BUF_SIZE];
 static uint32_t  zbs_log_format = LOG_OUTPUT_TEXT;
@@ -323,35 +319,19 @@ static ssize_t zbs_write_cmd(struct bt_conn *conn, const struct bt_gatt_attr *at
     if (len == 0 || len >= CONFIG_ZMK_BLE_SHELL_CMD_BUF_SIZE) {
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
-    if (k_mutex_lock(&zbs_cmd_mutex, K_NO_WAIT) != 0) {
+
+    const int err = zmk_shell_relay_queue_cmd((const char *)buf, len);
+    if (err == -ENOSPC) {
         return BT_GATT_ERR(BT_ATT_ERR_PROCEDURE_IN_PROGRESS);
     }
-
-    memcpy(zbs_cmd_buf, buf, len);
-    uint16_t end = len;
-    while (end > 0 &&
-           (zbs_cmd_buf[end - 1] == '\n' || zbs_cmd_buf[end - 1] == '\r')) {
-        end--;
+    if (err) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
-    zbs_cmd_buf[end] = '\0';
-
-    k_mutex_unlock(&zbs_cmd_mutex);
-    zmk_shell_relay_submit_exec(&zbs_cmd_exec_work);
     return (ssize_t)len;
 }
 
-static void zbs_cmd_exec_work_handler(struct k_work *work)
+static void zbs_cmd_done(const char *cmd, const int ret)
 {
-    ARG_UNUSED(work);
-    char cmd[CONFIG_ZMK_BLE_SHELL_CMD_BUF_SIZE];
-
-    k_mutex_lock(&zbs_cmd_mutex, K_FOREVER);
-    strncpy(cmd, zbs_cmd_buf, sizeof(cmd));
-    cmd[sizeof(cmd) - 1] = '\0';
-    k_mutex_unlock(&zbs_cmd_mutex);
-
-    const int ret = zmk_shell_relay_execute(cmd);
-
     if (ret == -ENOEXEC) {
         char msg[16 + sizeof(": command not found")];
         const int n = snprintk(msg, sizeof(msg),
