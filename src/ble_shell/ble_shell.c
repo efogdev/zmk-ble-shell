@@ -449,13 +449,22 @@ static const struct bt_data zbs_sd[] = {
 static void zbs_inject_sd_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(zbs_inject_sd_work, zbs_inject_sd_work_handler);
 
+static uint8_t inject_cnt = 0;
+
 static void zbs_inject_sd_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
+    inject_cnt++;
+
     const int err = bt_le_adv_update_data(zbs_ad, ARRAY_SIZE(zbs_ad), zbs_sd, ARRAY_SIZE(zbs_sd));
     if (err) {
         LOG_DBG("adv_update_data err %d, will retry", err);
-        k_work_reschedule(&zbs_inject_sd_work, K_MSEC(200));
+
+        if (inject_cnt < CONFIG_ZMK_BLE_SHELL_INJECT_RETRY_MAX) {
+            k_work_reschedule(&zbs_inject_sd_work, K_MSEC(CONFIG_ZMK_BLE_SHELL_INJECT_RETRY_INTERVAL));
+        } else {
+            LOG_WRN("Couldn't inject BLE advertisement data; giving up");
+        }
     } else {
         LOG_DBG("BLE shell service injected into advertising data");
     }
@@ -464,13 +473,14 @@ static void zbs_inject_sd_work_handler(struct k_work *work)
 static int zbs_ble_profile_listener(const zmk_event_t *eh)
 {
     ARG_UNUSED(eh);
-    k_work_reschedule(&zbs_inject_sd_work, K_MSEC(100));
+    inject_cnt = 0;
+    k_work_reschedule(&zbs_inject_sd_work, K_MSEC(CONFIG_ZMK_BLE_SHELL_INJECT_AFTER_SWITCH_MS));
     return ZMK_EV_EVENT_BUBBLE;
 }
 
 static int zbs_init(void)
 {
-    k_work_schedule(&zbs_inject_sd_work, K_MSEC(200));
+    k_work_schedule(&zbs_inject_sd_work, K_TICKS(CONFIG_ZMK_BLE_SHELL_INJECT_RETRY_INTERVAL));
     return 0;
 }
 
