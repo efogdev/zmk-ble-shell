@@ -23,18 +23,6 @@ config ZMK_BLE_SHELL_LOG_BUF_SIZE
     int "Log-formatting scratch buffer size (bytes)"
     default 256
 
-config ZMK_BLE_SHELL_INJECT_RETRY_INTERVAL
-    int "Interval for attempts of injecting the new advertising data"
-    default 5
-
-config ZMK_BLE_SHELL_INJECT_RETRY_MAX
-    int "Attempts for injecting"
-    default 25
-
-config ZMK_BLE_SHELL_INJECT_AFTER_SWITCH_MS
-    int "Inject advertising data in this amount of ms after profile switch"
-    default 1
-
 config ZMK_BLE_SHELL_PROMPT_EN
     bool "Send prompt after connect and each command"
     default y

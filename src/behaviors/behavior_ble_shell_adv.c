@@ -21,6 +21,7 @@
 #include <zephyr/devicetree.h>
 
 #include <zmk/behavior.h>
+#include <zmk/ble.h>
 
 #include "zephyr/bluetooth/uuid.h"
 
@@ -67,6 +68,10 @@ static void adv_stop(void)
 
 static int adv_start(void)
 {
+    if (zmk_ble_radio_yielded()) {
+        return -EBUSY;
+    }
+
     static const struct bt_le_adv_param param =
         BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_CONNECTABLE,
             BT_GAP_ADV_FAST_INT_MIN_2, BT_GAP_ADV_FAST_INT_MAX_2, NULL);
@@ -89,7 +94,6 @@ static int adv_start(void)
 void zmk_ble_shell_adv_on_connected(void)
 {
     if (k_work_delayable_is_pending(&adv_timeout_work)) {
-        LOG_DBG("MUI subscribed via existing connection — cancelling adv timeout");
         adv_stop();
     }
 }
